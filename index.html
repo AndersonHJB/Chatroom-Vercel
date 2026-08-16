@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="部署在 Vercel 的临时聊天室，访客消息 30 分钟自动过期。" />
+  <title>临时聊天室</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <section class="chat-card">
+      <header class="topbar">
+        <div>
+          <h1>临时聊天室</h1>
+          <p>访客消息保存 30 分钟 · 无数据库 · 无 Redis</p>
+        </div>
+        <div class="top-actions">
+          <span id="statusBadge" class="badge visitor">访客</span>
+          <button id="adminBtn" class="btn secondary" type="button">管理员登录</button>
+        </div>
+      </header>
+
+      <section id="adminPanel" class="admin-panel hidden" aria-label="管理员工具">
+        <div class="admin-panel-title">管理员工具</div>
+        <div class="admin-actions">
+          <button id="exportBtn" class="btn secondary" type="button">导出 JSON</button>
+          <label class="btn secondary file-btn">
+            导入 JSON
+            <input id="importInput" type="file" accept="application/json,.json" hidden />
+          </label>
+          <button id="clearBtn" class="btn danger" type="button">清空聊天</button>
+          <button id="logoutBtn" class="btn ghost" type="button">退出管理员</button>
+        </div>
+      </section>
+
+      <div id="notice" class="notice hidden"></div>
+
+      <section id="messages" class="messages" aria-live="polite"></section>
+
+      <form id="messageForm" class="composer">
+        <div class="composer-row">
+          <input
+            id="nicknameInput"
+            class="nickname-input"
+            maxlength="30"
+            placeholder="你的昵称"
+            autocomplete="nickname"
+          />
+          <span id="charCount" class="char-count">0 / 2000</span>
+        </div>
+        <textarea
+          id="messageInput"
+          maxlength="2000"
+          rows="3"
+          placeholder="输入消息，Enter 发送，Shift + Enter 换行"
+          required
+        ></textarea>
+        <div class="composer-footer">
+          <span class="hint">服务器会在读取/发送时清理过期访客消息；页面本地也会定时清理。</span>
+          <button id="sendBtn" class="btn primary" type="submit">发送</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="adminDialog" class="dialog">
+    <form id="adminLoginForm" method="dialog" class="dialog-card">
+      <div class="dialog-title">管理员登录</div>
+      <p>密码只保存在当前浏览器标签页的 sessionStorage 中。</p>
+      <input id="adminPasswordInput" type="password" placeholder="输入管理员密码" autocomplete="current-password" required />
+      <div class="dialog-actions">
+        <button id="cancelAdminBtn" class="btn ghost" type="button">取消</button>
+        <button class="btn primary" type="submit">登录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
