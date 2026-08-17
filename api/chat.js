@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 const VISITOR_TTL_MS = 30 * 60 * 1000;
 const PEER_TTL_MS = 20 * 1000;
 const SIGNAL_TTL_MS = 2 * 60 * 1000;
+const ADMIN_ONLINE_TTL_MS = 35 * 1000;
 const MAX_MESSAGES = 500;
 const MAX_SIGNALS = 1500;
 const MAX_NAME_LENGTH = 30;
@@ -14,13 +15,15 @@ const MAX_SIGNAL_BYTES = 120 * 1024;
 const state = globalThis.__TEMP_CHAT_STATE__ || {
   messages: [],
   peers: {},
-  signals: []
+  signals: [],
+  adminLastSeen: 0
 };
 
 // 兼容旧版本热实例。
 state.messages ||= [];
 state.peers ||= {};
 state.signals ||= [];
+state.adminLastSeen ||= 0;
 
 globalThis.__TEMP_CHAT_STATE__ = state;
 
@@ -71,6 +74,19 @@ function isAdmin(req) {
   if (a.length !== b.length) return false;
 
   return crypto.timingSafeEqual(a, b);
+}
+
+
+function touchAdmin() {
+  state.adminLastSeen = now();
+}
+
+function setAdminOffline() {
+  state.adminLastSeen = 0;
+}
+
+function isAdminOnline() {
+  return Number(state.adminLastSeen) + ADMIN_ONLINE_TTL_MS > now();
 }
 
 function setHeaders(res) {
@@ -146,6 +162,38 @@ export default async function handler(req, res) {
   cleanupState();
 
   if (req.method === 'GET') {
+    const adminAuthenticated = isAdmin(req);
+    const mode = String(req.query?.mode ?? '');
+
+    if (adminAuthenticated) touchAdmin();
+
+    // 状态探测只返回管理员在线状态，不注册访客、不拉取消息。
+    if (mode === 'status') {
+      return json(res, 200, {
+        ok: true,
+        adminOnline: isAdminOnline(),
+        adminAuthenticated,
+        serverTime: now(),
+        adminOnlineTtlMs: ADMIN_ONLINE_TTL_MS
+      });
+    }
+
+    const adminOnline = isAdminOnline();
+    if (!adminAuthenticated && !adminOnline) {
+      return json(res, 200, {
+        ok: true,
+        adminOnline: false,
+        adminAuthenticated: false,
+        messages: [],
+        peers: [],
+        signals: [],
+        serverTime: now(),
+        visitorTtlMs: VISITOR_TTL_MS,
+        peerTtlMs: PEER_TTL_MS,
+        adminOnlineTtlMs: ADMIN_ONLINE_TTL_MS
+      });
+    }
+
     const peerId = normalizePeerId(req.query?.peerId);
     const nickname = normalizeText(req.query?.nickname, MAX_NAME_LENGTH);
     touchPeer(peerId, nickname);
@@ -158,12 +206,15 @@ export default async function handler(req, res) {
 
     return json(res, 200, {
       ok: true,
+      adminOnline: true,
+      adminAuthenticated,
       messages: publicMessages(),
       peers: publicPeers(peerId),
       signals,
       serverTime: now(),
       visitorTtlMs: VISITOR_TTL_MS,
-      peerTtlMs: PEER_TTL_MS
+      peerTtlMs: PEER_TTL_MS,
+      adminOnlineTtlMs: ADMIN_ONLINE_TTL_MS
     });
   }
 
@@ -183,9 +234,27 @@ export default async function handler(req, res) {
       });
     }
 
-    return isAdmin(req)
-      ? json(res, 200, { ok: true, admin: true })
-      : json(res, 401, { ok: false, error: '管理员密码错误' });
+    if (!isAdmin(req)) {
+      return json(res, 401, { ok: false, error: '管理员密码错误' });
+    }
+
+    touchAdmin();
+    return json(res, 200, {
+      ok: true,
+      admin: true,
+      adminOnline: true,
+      adminOnlineTtlMs: ADMIN_ONLINE_TTL_MS
+    });
+  }
+
+  if (action === 'logout') {
+    if (!isAdmin(req)) {
+      return json(res, 401, { ok: false, error: '需要管理员权限' });
+    }
+    setAdminOffline();
+    state.peers = {};
+    state.signals = [];
+    return json(res, 200, { ok: true, adminOnline: false });
   }
 
   if (action === 'send') {
@@ -197,6 +266,12 @@ export default async function handler(req, res) {
     }
 
     const admin = isAdmin(req);
+    if (admin) {
+      touchAdmin();
+    } else if (!isAdminOnline()) {
+      return json(res, 409, { ok: false, error: '管理员当前离线，聊天室已暂停' });
+    }
+
     const createdAt = now();
     const message = {
       id: crypto.randomUUID(),
@@ -219,6 +294,13 @@ export default async function handler(req, res) {
 
   // WebRTC 只通过 Vercel 交换很小的 SDP 信令；文件二进制不经过这里。
   if (action === 'signal') {
+    const admin = isAdmin(req);
+    if (admin) {
+      touchAdmin();
+    } else if (!isAdminOnline()) {
+      return json(res, 409, { ok: false, error: '管理员当前离线，P2P 信令已暂停' });
+    }
+
     const fromPeerId = normalizePeerId(body.fromPeerId);
     const toPeerId = normalizePeerId(body.toPeerId);
     const signalType = String(body.signalType ?? '');
@@ -256,6 +338,7 @@ export default async function handler(req, res) {
   if (!isAdmin(req)) {
     return json(res, 401, { ok: false, error: '需要管理员权限' });
   }
+  touchAdmin();
 
   if (action === 'export') {
     return json(res, 200, {

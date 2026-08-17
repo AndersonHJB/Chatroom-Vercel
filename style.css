@@ -106,6 +106,20 @@ h1 { margin: 0 0 5px; font-size: 22px; }
 .notice.error { background: #fef2f2; color: #b91c1c; }
 .notice.success { background: #ecfdf5; color: #047857; }
 
+.offline-panel {
+  margin: 12px 24px 0;
+  padding: 12px 14px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.offline-panel strong { font-size: 13px; color: #92400e; }
+.offline-panel p { margin: 3px 0 0; font-size: 11px; color: #a16207; line-height: 1.5; }
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -244,6 +258,7 @@ textarea { resize: none; line-height: 1.5; }
   .topbar p { max-width: 230px; }
   .top-actions { justify-content: flex-end; }
   .admin-panel { padding: 10px 16px; align-items: flex-start; flex-direction: column; }
+  .offline-panel { margin: 10px 14px 0; align-items: flex-start; flex-direction: column; }
   .messages { padding: 18px 14px; }
   .message { max-width: 88%; }
   .p2p-panel { padding: 11px 12px; }

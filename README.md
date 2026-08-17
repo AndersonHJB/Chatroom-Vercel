@@ -1,133 +1,98 @@
-# Vercel 临时聊天室 + WebRTC P2P 文件直传
+# Vercel 临时聊天室（管理员上线才启动 + WebRTC P2P 文件直传）
 
-一个可以直接部署到 Vercel 的单房间临时聊天室。
+这是一个不使用 Redis、数据库或对象存储的临时聊天室。
 
-## 功能
+## 这一版的核心逻辑
 
-- 普通访客无需登录即可聊天
-- 管理员密码登录
-- 管理员消息单独标识
-- 普通访客每条文字消息 30 分钟后过期
-- 浏览器 `localStorage` 缓存文字聊天记录
-- 管理员导入 / 导出 JSON
-- 管理员清空聊天
-- 图片、视频、压缩包、安装包等任意文件 P2P 直传
-- 支持一次选择多个文件
-- 支持选择单个在线用户或全部在线用户
-- 图片 / 视频接收后可直接预览
-- 文件通过 WebRTC DataChannel 传输，文件二进制不上传 Vercel
-- 无数据库、无 Redis、无 Blob、无第三方持久化存储
+- 访客打开页面时，只请求一次 `/api/chat?mode=status` 检查管理员是否在线。
+- 如果管理员离线：
+  - 停止自动轮询；
+  - 不注册在线访客；
+  - 禁止发送文字消息；
+  - 禁止发送 WebRTC P2P 信令；
+  - 页面显示“管理员当前离线，聊天室已暂停”；
+  - 只有刷新页面或点击“检查管理员是否上线”时才额外请求一次 Vercel。
+- 管理员输入正确密码后：
+  - 立即标记管理员在线；
+  - 开始聊天轮询；
+  - 访客重新检查/刷新后进入在线聊天状态；
+  - P2P 文件传输恢复。
+- 管理员点击“退出管理员”：
+  - 服务端立即标记管理员离线；
+  - 当前管理员页面停止轮询；
+  - 在线访客在下一次轮询发现管理员离线后自动停止轮询。
+- 如果管理员直接关闭浏览器而没有点击退出：
+  - 管理员在线状态会在约 35 秒没有心跳后自动过期；
+  - 访客随后会自动停止轮询。
 
-## P2P 文件传输原理
+> 离线状态下仍有一个每 15 秒运行的浏览器本地计时器，用来清理 localStorage 中超过 30 分钟的访客消息。这个计时器不访问网络，不消耗 Vercel 请求额度。
 
-```text
-发送方浏览器 ──────────────── 接收方浏览器
-             WebRTC DataChannel
-             文件二进制直传
+## 文件传输
 
-       \                       /
-        \── Vercel /api/chat ─/
-             只交换 SDP 信令
-```
+支持图片、视频、ZIP/RAR/7z、DMG、EXE、APK 等任意文件。
 
-Vercel 只看到：
-
-- 页面静态资源
-- 聊天文字 API
-- 在线状态
-- WebRTC SDP offer / answer
-
-Vercel **不会接收文件二进制内容**。
-
-### 为什么没有 TURN？
-
-本项目刻意不配置 TURN 中继，因为 TURN 会把文件流量经过中继服务器，不再是纯直连。
-
-因此：
-
-- 普通家庭宽带 / 手机网络通常可以直连；
-- 某些对称 NAT、公司、校园、严格防火墙环境可能无法建立 P2P；
-- 直连失败时项目不会偷偷改走 Vercel 中转。
-
-## 大文件说明
-
-代码按 64KB 分块发送，因此不受 Vercel 请求体大小限制。
-
-但是当前浏览器接收端会先把分块保存在内存，全部接收完后再生成 Blob 下载。因此超大文件仍受浏览器可用内存限制。实践上建议单文件控制在几百 MB 以内；如果需要稳定传输数 GB / 数十 GB，需要进一步接入 File System Access API 进行接收端流式落盘。
-
-## 重要限制：完全无持久化存储
-
-Vercel Functions 属于弹性、临时执行环境。本项目又明确不使用数据库 / Redis，因此：
-
-1. 文字聊天和 WebRTC 信令只存在某个 Function 实例的内存中；
-2. 冷启动、扩容、重新部署可能清空服务端内存；
-3. 多 Function 实例时可能看到不同的临时内存状态；
-4. P2P 两端必须同时在线；
-5. 文件不会进入 JSON，也不会进入 localStorage；刷新后接收记录里的 Blob 下载链接会消失；
-6. 纯 P2P 信令在 Vercel 多实例情况下不能做到企业级 100% 可靠。这是“不使用任何共享存储”的直接结果。
-
-## Vercel 用量
-
-文件二进制通过 WebRTC 在客户端之间直传，因此文件大小本身不占 Vercel Fast Data Transfer。
-
-Vercel 用量主要来自：
-
-- 用户第一次访问下载 HTML/CSS/JS；
-- `/api/chat` 普通前台约每 10 秒轮询一次、后台标签页约每 60 秒一次；
-- P2P 握手期间会短暂加速轮询；
-- 发送文字消息、管理员操作和少量 P2P SDP 信令。
-
-所以如果在线人数非常多并且页面长时间保持打开，请求次数会比文件流量更值得关注。
-
-## 部署到 Vercel
-
-### 1. 推送 GitHub
-
-```bash
-git init
-git add .
-git commit -m "init temp p2p chat"
-git branch -M main
-git remote add origin git@github.com:你的用户名/vercel-temp-chat.git
-git push -u origin main
-```
-
-### 2. Vercel 导入仓库
-
-直接 Import Git Repository。
-
-本项目无 npm 依赖，无需 Build Command。
-
-### 3. 配置管理员密码
-
-Vercel 项目：
-
-`Settings -> Environment Variables`
-
-添加：
+文件通过 WebRTC DataChannel 浏览器到浏览器直传：
 
 ```text
-ADMIN_PASSWORD=你自己的强密码
+发送方浏览器  ==================>  接收方浏览器
+                WebRTC P2P 文件
+
+                      ↑
+                      │ 仅 SDP 信令
+                      │
+                    Vercel
 ```
 
-保存后重新部署。
+文件二进制不会经过 Vercel，不会保存到 JSON、localStorage 或 Vercel Function 内存。
 
-## 本地运行
+项目没有配置 TURN 服务器，因此部分严格 NAT、公司网络或特殊运营商网络可能无法建立 P2P 连接。
 
-```bash
-npm i -g vercel
+## 消息过期
+
+- 普通访客文字消息：30 分钟后过期。
+- 管理员文字消息：默认不设置 30 分钟 TTL。
+- 浏览器会在本地自动清理过期缓存。
+- 服务端每次收到请求时也会清理过期消息。
+
+## 管理员密码
+
+在 Vercel 项目的 Environment Variables 中设置：
+
+```text
+ADMIN_PASSWORD=你的管理员密码
 ```
 
-创建 `.env.local`：
+密码不会写进前端源码，登录后只保存在当前标签页的 `sessionStorage`。
 
-```bash
-ADMIN_PASSWORD=12345678
+## 部署
+
+项目可直接推送到 GitHub，然后导入 Vercel。
+
+目录：
+
+```text
+vercel-temp-chat/
+├── api/
+│   └── chat.js
+├── app.js
+├── index.html
+├── style.css
+├── vercel.json
+└── README.md
 ```
 
-运行：
+设置 `ADMIN_PASSWORD` 后重新部署即可。
 
-```bash
-vercel dev
+## 关于“不使用任何存储”的限制
+
+服务端状态保存在：
+
+```js
+globalThis.__TEMP_CHAT_STATE__
 ```
 
-WebRTC 在生产环境需要安全上下文；Vercel 自带 HTTPS，部署后无需额外配置证书。
+因此管理员在线状态、聊天消息、在线用户和 WebRTC 信令都只属于当前 Vercel Function 热实例。
+
+Vercel Function 冷启动、扩容、重新部署或多个实例并存时，这些状态可能丢失或不同步。这是完全不使用 Redis、数据库或其他共享存储时无法避免的限制。
+
+因此这个方案适合轻量、临时、少量用户的聊天室，不适合要求强一致性的正式 IM 系统。

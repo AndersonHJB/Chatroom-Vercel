@@ -36,6 +36,14 @@
 
       <div id="notice" class="notice hidden"></div>
 
+      <section id="offlinePanel" class="offline-panel hidden" aria-live="polite">
+        <div>
+          <strong>管理员当前离线，聊天室已暂停</strong>
+          <p>此状态不会自动轮询 Vercel。管理员上线后，请刷新页面或手动检查一次。</p>
+        </div>
+        <button id="checkAdminBtn" class="btn secondary" type="button">检查管理员是否上线</button>
+      </section>
+
       <section id="messages" class="messages" aria-live="polite"></section>
 
       <section class="p2p-panel" aria-label="P2P 文件传输">

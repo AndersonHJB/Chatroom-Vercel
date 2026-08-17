@@ -5,6 +5,7 @@ const ADMIN_PASSWORD_KEY = 'vercel-temp-chat:admin-password:v1';
 const PEER_ID_KEY = 'vercel-temp-chat:peer-id:v1';
 const VISIBLE_POLL_MS = 10000;
 const HIDDEN_POLL_MS = 60000;
+const ADMIN_HIDDEN_POLL_MS = 15000;
 const FAST_POLL_MS = 1000;
 const FILE_CHUNK_SIZE = 64 * 1024;
 const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024;
@@ -35,6 +36,8 @@ const el = {
   clearBtn: document.querySelector('#clearBtn'),
   logoutBtn: document.querySelector('#logoutBtn'),
   notice: document.querySelector('#notice'),
+  offlinePanel: document.querySelector('#offlinePanel'),
+  checkAdminBtn: document.querySelector('#checkAdminBtn'),
   adminDialog: document.querySelector('#adminDialog'),
   adminLoginForm: document.querySelector('#adminLoginForm'),
   adminPasswordInput: document.querySelector('#adminPasswordInput'),
@@ -53,6 +56,8 @@ let noticeTimer = null;
 let pollTimer = null;
 let fastPollUntil = 0;
 let requestInFlight = false;
+let statusCheckInFlight = false;
+let chatActive = false;
 let peers = [];
 let selectedP2PFiles = [];
 
@@ -221,10 +226,35 @@ function render({ stickToBottom = false } = {}) {
 function setAdminUi() {
   const admin = isAdmin();
   el.adminPanel.classList.toggle('hidden', !admin);
-  el.statusBadge.textContent = admin ? '管理员' : '访客';
+  el.statusBadge.textContent = admin ? '管理员在线' : (chatActive ? '访客在线' : '等待管理员');
   el.statusBadge.className = `badge ${admin ? 'admin' : 'visitor'}`;
   el.adminBtn.classList.toggle('hidden', admin);
   el.nickname.placeholder = admin ? '管理员昵称' : '你的昵称';
+}
+
+function setInteractionEnabled(enabled) {
+  el.input.disabled = !enabled;
+  el.sendBtn.disabled = !enabled;
+  el.p2pFileInput.disabled = !enabled;
+  el.peerSelect.disabled = !enabled || peers.length === 0;
+  updateSendFileButton();
+}
+
+function setChatActive(active) {
+  chatActive = Boolean(active);
+  clearTimeout(pollTimer);
+  pollTimer = null;
+
+  el.offlinePanel.classList.toggle('hidden', chatActive || isAdmin());
+  setInteractionEnabled(chatActive);
+
+  if (!chatActive) {
+    fastPollUntil = 0;
+    renderPeers([]);
+    for (const peerId of [...peerConnections.keys()]) closePeer(peerId, false);
+  }
+
+  setAdminUi();
 }
 
 function showNotice(text, type = 'info', timeout = 2600) {
@@ -273,7 +303,7 @@ function renderPeers(nextPeers) {
     el.peerSelect.appendChild(option);
     el.peerSelect.disabled = true;
   } else {
-    el.peerSelect.disabled = false;
+    el.peerSelect.disabled = !chatActive;
 
     if (peers.length > 1) {
       const all = document.createElement('option');
@@ -299,7 +329,7 @@ function renderPeers(nextPeers) {
 
 function updateSendFileButton() {
   const hasTarget = Boolean(el.peerSelect.value) && !el.peerSelect.disabled;
-  el.sendFileBtn.disabled = !hasTarget || selectedP2PFiles.length === 0;
+  el.sendFileBtn.disabled = !chatActive || !hasTarget || selectedP2PFiles.length === 0;
 }
 
 function renderSelectedFiles() {
@@ -317,21 +347,27 @@ function peerName(peerId) {
 }
 
 function currentPollDelay() {
+  if (!chatActive) return null;
   if (Date.now() < fastPollUntil) return FAST_POLL_MS;
+  if (isAdmin() && document.hidden) return ADMIN_HIDDEN_POLL_MS;
   return document.hidden ? HIDDEN_POLL_MS : VISIBLE_POLL_MS;
 }
 
 function schedulePoll(delay = currentPollDelay()) {
   clearTimeout(pollTimer);
+  pollTimer = null;
+  if (!chatActive || delay === null) return;
   pollTimer = setTimeout(pollLoop, delay);
 }
 
 function boostPolling(durationMs = 25000) {
+  if (!chatActive) return;
   fastPollUntil = Math.max(fastPollUntil, Date.now() + durationMs);
   schedulePoll(150);
 }
 
 async function sendSignal(toPeerId, signalType, data = null) {
+  if (!chatActive) throw new Error('管理员离线，P2P 文件传输已暂停');
   boostPolling();
   return request({
     action: 'signal',
@@ -732,7 +768,7 @@ async function handleDataMessage(remotePeerId, data) {
 }
 
 async function syncMessages({ quiet = false } = {}) {
-  if (requestInFlight) return;
+  if (!chatActive || requestInFlight) return;
   requestInFlight = true;
 
   try {
@@ -741,12 +777,29 @@ async function syncMessages({ quiet = false } = {}) {
       peerId: SELF_PEER_ID,
       nickname: getNickname()
     });
-    const response = await fetch(`${API}?${params}`, { cache: 'no-store' });
+    const headers = { 'Cache-Control': 'no-cache' };
+    const password = getAdminPassword();
+    if (password) headers['X-Admin-Password'] = password;
+
+    const response = await fetch(`${API}?${params}`, { headers, cache: 'no-store' });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '同步失败');
 
     if (Number.isFinite(data.serverTime)) {
       serverClockOffset = data.serverTime - Date.now();
+    }
+
+    if (isAdmin() && !data.adminAuthenticated) {
+      sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
+      setChatActive(false);
+      showNotice('管理员身份已失效，请重新登录', 'error', 4000);
+      return;
+    }
+
+    if (!isAdmin() && data.adminOnline === false) {
+      setChatActive(false);
+      showNotice('管理员已下线，已停止自动轮询', 'info', 3500);
+      return;
     }
 
     messages = mergeMessages(messages, data.messages);
@@ -764,7 +817,59 @@ async function syncMessages({ quiet = false } = {}) {
   }
 }
 
+async function checkAdminStatus({ quiet = false } = {}) {
+  if (statusCheckInFlight) return false;
+  statusCheckInFlight = true;
+  el.checkAdminBtn.disabled = true;
+
+  try {
+    const headers = { 'Cache-Control': 'no-cache' };
+    const password = getAdminPassword();
+    if (password) headers['X-Admin-Password'] = password;
+
+    const params = new URLSearchParams({ mode: 'status', t: String(Date.now()) });
+    const response = await fetch(`${API}?${params}`, { headers, cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '状态检查失败');
+
+    if (Number.isFinite(data.serverTime)) {
+      serverClockOffset = data.serverTime - Date.now();
+    }
+
+    if (password && !data.adminAuthenticated) {
+      sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
+      setChatActive(false);
+      if (!quiet) showNotice('管理员密码已失效，请重新登录', 'error');
+      return false;
+    }
+
+    if (isAdmin() || data.adminOnline) {
+      setChatActive(true);
+      await syncMessages({ quiet: true });
+      schedulePoll();
+      if (!quiet && !isAdmin()) showNotice('管理员已上线，聊天室已启动', 'success');
+      return true;
+    }
+
+    setChatActive(false);
+    if (!quiet) showNotice('管理员仍未上线，继续保持零轮询状态');
+    return false;
+  } catch (error) {
+    setChatActive(false);
+    if (!quiet) showNotice(`检查失败：${error.message}`, 'error', 4000);
+    return false;
+  } finally {
+    statusCheckInFlight = false;
+    el.checkAdminBtn.disabled = false;
+  }
+}
+
 async function sendMessage() {
+  if (!chatActive) {
+    showNotice('管理员当前离线，聊天室已暂停');
+    return;
+  }
+
   const nickname = el.nickname.value.trim() || (isAdmin() ? '管理员' : '匿名');
   const content = el.input.value.trim();
   if (!content) return;
@@ -780,8 +885,11 @@ async function sendMessage() {
   } catch (error) {
     if (error.status === 401 && isAdmin()) {
       sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
-      setAdminUi();
+      setChatActive(false);
       showNotice('管理员密码已失效，请重新登录', 'error');
+    } else if (error.status === 409 && !isAdmin()) {
+      setChatActive(false);
+      showNotice('管理员已下线，聊天室已暂停', 'info');
     } else {
       showNotice(error.message, 'error');
     }
@@ -806,7 +914,9 @@ async function loginAdmin(password) {
   if (!response.ok) throw new Error(data.error || '登录失败');
 
   sessionStorage.setItem(ADMIN_PASSWORD_KEY, password);
-  setAdminUi();
+  setChatActive(true);
+  await syncMessages({ quiet: true });
+  schedulePoll();
 }
 
 function downloadJson(data) {
@@ -840,7 +950,7 @@ el.input.addEventListener('keydown', async (event) => {
 
 el.nickname.addEventListener('change', () => {
   localStorage.setItem(NICKNAME_KEY, el.nickname.value.trim());
-  syncMessages({ quiet: true });
+  if (chatActive) syncMessages({ quiet: true });
 });
 
 el.adminBtn.addEventListener('click', () => {
@@ -850,6 +960,10 @@ el.adminBtn.addEventListener('click', () => {
 });
 
 el.cancelAdminBtn.addEventListener('click', () => el.adminDialog.close());
+
+el.checkAdminBtn.addEventListener('click', async () => {
+  await checkAdminStatus();
+});
 
 el.adminLoginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -865,10 +979,15 @@ el.adminLoginForm.addEventListener('submit', async (event) => {
   }
 });
 
-el.logoutBtn.addEventListener('click', () => {
+el.logoutBtn.addEventListener('click', async () => {
+  try {
+    await request({ action: 'logout' });
+  } catch {
+    // 即使网络请求失败，本地仍立即停止；服务端会由在线 TTL 自动过期。
+  }
   sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
-  setAdminUi();
-  showNotice('已退出管理员模式');
+  setChatActive(false);
+  showNotice('管理员已下线，自动轮询已停止');
 });
 
 el.exportBtn.addEventListener('click', async () => {
@@ -934,6 +1053,10 @@ el.p2pFileInput.addEventListener('change', () => {
 el.peerSelect.addEventListener('change', updateSendFileButton);
 
 el.sendFileBtn.addEventListener('click', async () => {
+  if (!chatActive) {
+    showNotice('管理员离线，P2P 文件传输已暂停');
+    return;
+  }
   if (!selectedP2PFiles.length) return;
 
   const target = el.peerSelect.value;
@@ -964,34 +1087,39 @@ el.sendFileBtn.addEventListener('click', async () => {
 });
 
 async function pollLoop() {
+  if (!chatActive) return;
   await syncMessages({ quiet: true });
-  schedulePoll();
+  if (chatActive) schedulePoll();
 }
 
-function startTimers() {
-  schedulePoll(1000);
-
+function startLocalTimers() {
+  // 只负责本地过期清理，不产生任何 Vercel 请求。
   setInterval(() => {
     messages = pruneExpired(messages);
     render();
   }, 15_000);
 }
 
-function init() {
+async function init() {
   el.nickname.value = localStorage.getItem(NICKNAME_KEY) || '';
   loadCache();
-  setAdminUi();
   renderSelectedFiles();
   renderPeers([]);
+  setChatActive(false);
   render({ stickToBottom: true });
-  syncMessages({ quiet: true });
-  startTimers();
+  startLocalTimers();
+
+  // 页面加载只做一次状态检查。若管理员离线，此后不会自动请求 Vercel。
+  await checkAdminStatus({ quiet: true });
   el.input.focus();
 }
 
 document.addEventListener('visibilitychange', () => {
+  if (!chatActive) return;
   if (!document.hidden) syncMessages({ quiet: true });
-  schedulePoll(document.hidden ? HIDDEN_POLL_MS : 250);
+  schedulePoll(document.hidden
+    ? (isAdmin() ? ADMIN_HIDDEN_POLL_MS : HIDDEN_POLL_MS)
+    : 250);
 });
 
 window.addEventListener('beforeunload', () => {
