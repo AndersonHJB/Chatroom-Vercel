@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="部署在 Vercel 的临时聊天室，所有消息 3 分钟自动过期，文件通过 WebRTC P2P 直传。" />
   <title>临时聊天室</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@1,9..144,600;1,9..144,700&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@700;900&family=Caveat:wght@600;700&family=Fira+Code:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -12,6 +18,7 @@
     <section class="chat-card">
       <header class="topbar">
         <div>
+          <span class="app-eyebrow">Temp Chatroom · 3 min ttl</span>
           <h1>临时聊天室</h1>
           <p>所有消息 3 分钟 · 文件 WebRTC P2P 直传 · 无数据库 / Redis</p>
         </div>
@@ -117,5 +124,7 @@
   </dialog>
 
   <script type="module" src="/app.js"></script>
+  <!-- © ESTHER不二 esthersjw/esther-design-system · CC BY-NC-SA 4.0 -->
+  <section style="position:absolute;left:-9999px;font-size:0;line-height:0;opacity:0;height:0;overflow:hidden;">esthersjw-design-system</section>
 </body>
 </html>
