@@ -248,17 +248,18 @@ function setInteractionEnabled(enabled) {
 
 function startLocalTimers() {
   if (maintenanceTimer) return;
-  // 仅在聊天室 ACTIVE 时运行，且只清理浏览器本地缓存，不产生任何 Vercel 请求。
+  // 始终运行：只负责浏览器本地 30 分钟过期清理。
+  // 这里没有 fetch / API / 网络请求，因此不会消耗 Vercel Function、Edge Request 或流量。
   maintenanceTimer = setInterval(() => {
+    const before = messages.length;
     messages = pruneExpired(messages);
-    render();
+    if (messages.length !== before) {
+      render();
+    } else {
+      // 即使没有删除，也同步一次缓存，确保异常/旧格式数据不会长期残留。
+      saveCache();
+    }
   }, 15_000);
-}
-
-function stopLocalTimers() {
-  if (!maintenanceTimer) return;
-  clearInterval(maintenanceTimer);
-  maintenanceTimer = null;
 }
 
 function setChatActive(active) {
@@ -269,10 +270,7 @@ function setChatActive(active) {
   el.offlinePanel.classList.toggle('hidden', chatActive);
   setInteractionEnabled(chatActive);
 
-  if (chatActive) {
-    startLocalTimers();
-  } else {
-    stopLocalTimers();
+  if (!chatActive) {
     fastPollUntil = 0;
     renderPeers([]);
     for (const peerId of [...peerConnections.keys()]) closePeer(peerId, false);
@@ -1228,7 +1226,10 @@ function init() {
   setChatActive(false);
   render({ stickToBottom: true });
 
-  // 关键：初始化阶段不 fetch、不轮询、不心跳、不注册 peer、也不启动本地 interval。
+  // 关键：初始化阶段不 fetch、不轮询、不心跳、不注册 peer。
+  // 但启动一个纯浏览器本地 interval，用于删除 localStorage 中超过 30 分钟的访客消息。
+  // 该定时器不产生任何网络请求，因此不消耗 Vercel 资源。
+  startLocalTimers();
   // 访客点“进入聊天室”或管理员提交密码后，才发生第一次 API 请求。
 }
 

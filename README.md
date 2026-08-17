@@ -126,3 +126,10 @@ vercel-temp-chat/
 ├── vercel.json
 └── README.md
 ```
+
+
+## 静默状态下的 30 分钟删除机制
+
+- 浏览器始终保留一个 15 秒本地定时器，只检查 `localStorage` 中消息的 `expiresAt` 并删除过期访客消息。
+- 该定时器不包含 `fetch`，不会请求 `/api/chat`，因此不会消耗 Vercel API / Function / 网络流量。
+- Vercel Function 内存中的过期消息不通过后台定时任务清理；聊天室静默时服务器完全不执行。下次 API 被主动调用时，`cleanupState()` 会先删除所有过期消息再返回。
