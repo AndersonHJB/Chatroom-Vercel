@@ -2,7 +2,23 @@ const API = '/api/chat';
 const CACHE_KEY = 'vercel-temp-chat:messages:v1';
 const NICKNAME_KEY = 'vercel-temp-chat:nickname:v1';
 const ADMIN_PASSWORD_KEY = 'vercel-temp-chat:admin-password:v1';
-const POLL_MS = 3000;
+const PEER_ID_KEY = 'vercel-temp-chat:peer-id:v1';
+const VISIBLE_POLL_MS = 10000;
+const HIDDEN_POLL_MS = 60000;
+const FAST_POLL_MS = 1000;
+const FILE_CHUNK_SIZE = 64 * 1024;
+const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024;
+const ICE_TIMEOUT_MS = 7000;
+const CONNECTION_TIMEOUT_MS = 18000;
+
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ],
+  // 不配置 TURN：失败时不会把文件退化成服务器中继。
+  iceTransportPolicy: 'all'
+};
 
 const el = {
   messages: document.querySelector('#messages'),
@@ -22,14 +38,49 @@ const el = {
   adminDialog: document.querySelector('#adminDialog'),
   adminLoginForm: document.querySelector('#adminLoginForm'),
   adminPasswordInput: document.querySelector('#adminPasswordInput'),
-  cancelAdminBtn: document.querySelector('#cancelAdminBtn')
+  cancelAdminBtn: document.querySelector('#cancelAdminBtn'),
+  peerSelect: document.querySelector('#peerSelect'),
+  peerCount: document.querySelector('#peerCount'),
+  p2pFileInput: document.querySelector('#p2pFileInput'),
+  sendFileBtn: document.querySelector('#sendFileBtn'),
+  selectedFiles: document.querySelector('#selectedFiles'),
+  transferList: document.querySelector('#transferList')
 };
 
 let messages = [];
 let serverClockOffset = 0;
 let noticeTimer = null;
 let pollTimer = null;
+let fastPollUntil = 0;
 let requestInFlight = false;
+let peers = [];
+let selectedP2PFiles = [];
+
+const processedSignals = new Set();
+const peerConnections = new Map();
+const dataChannels = new Map();
+const incomingTransfers = new Map();
+const outgoingQueues = new Map();
+
+function createPeerId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+}
+
+function getPeerId() {
+  let value = sessionStorage.getItem(PEER_ID_KEY);
+  if (!value) {
+    value = createPeerId();
+    sessionStorage.setItem(PEER_ID_KEY, value);
+  }
+  return value;
+}
+
+const SELF_PEER_ID = getPeerId();
+
+function getNickname() {
+  return el.nickname.value.trim() || (isAdmin() ? '管理员' : '匿名访客');
+}
 
 function getAdminPassword() {
   return sessionStorage.getItem(ADMIN_PASSWORD_KEY) || '';
@@ -89,6 +140,19 @@ function formatTime(timestamp) {
     minute: '2-digit',
     second: '2-digit'
   }).format(new Date(timestamp));
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let n = value / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && n >= 1024; i += 1) {
+    n /= 1024;
+    unit = units[i];
+  }
+  return `${n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit}`;
 }
 
 function formatRemaining(expiresAt) {
@@ -195,12 +259,489 @@ async function request(body, method = 'POST') {
   return data;
 }
 
+function renderPeers(nextPeers) {
+  const previous = el.peerSelect.value;
+  peers = Array.isArray(nextPeers) ? nextPeers : [];
+
+  el.peerCount.textContent = `${peers.length} 个其他在线用户`;
+  el.peerSelect.replaceChildren();
+
+  if (!peers.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '暂无其他在线用户';
+    el.peerSelect.appendChild(option);
+    el.peerSelect.disabled = true;
+  } else {
+    el.peerSelect.disabled = false;
+
+    if (peers.length > 1) {
+      const all = document.createElement('option');
+      all.value = '*';
+      all.textContent = `所有在线用户（${peers.length}）`;
+      el.peerSelect.appendChild(all);
+    }
+
+    for (const peer of peers) {
+      const option = document.createElement('option');
+      option.value = peer.id;
+      option.textContent = `${peer.nickname || '匿名访客'} · ${peer.id.slice(0, 6)}`;
+      el.peerSelect.appendChild(option);
+    }
+
+    if ([...el.peerSelect.options].some((option) => option.value === previous)) {
+      el.peerSelect.value = previous;
+    }
+  }
+
+  updateSendFileButton();
+}
+
+function updateSendFileButton() {
+  const hasTarget = Boolean(el.peerSelect.value) && !el.peerSelect.disabled;
+  el.sendFileBtn.disabled = !hasTarget || selectedP2PFiles.length === 0;
+}
+
+function renderSelectedFiles() {
+  if (!selectedP2PFiles.length) {
+    el.selectedFiles.textContent = '可发送图片、视频、ZIP/RAR/7z、DMG、EXE、APK 等任意文件。';
+  } else {
+    const total = selectedP2PFiles.reduce((sum, file) => sum + file.size, 0);
+    el.selectedFiles.textContent = `已选择 ${selectedP2PFiles.length} 个文件，共 ${formatBytes(total)}：${selectedP2PFiles.map((f) => f.name).join('、')}`;
+  }
+  updateSendFileButton();
+}
+
+function peerName(peerId) {
+  return peers.find((peer) => peer.id === peerId)?.nickname || `用户 ${peerId.slice(0, 6)}`;
+}
+
+function currentPollDelay() {
+  if (Date.now() < fastPollUntil) return FAST_POLL_MS;
+  return document.hidden ? HIDDEN_POLL_MS : VISIBLE_POLL_MS;
+}
+
+function schedulePoll(delay = currentPollDelay()) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollLoop, delay);
+}
+
+function boostPolling(durationMs = 25000) {
+  fastPollUntil = Math.max(fastPollUntil, Date.now() + durationMs);
+  schedulePoll(150);
+}
+
+async function sendSignal(toPeerId, signalType, data = null) {
+  boostPolling();
+  return request({
+    action: 'signal',
+    fromPeerId: SELF_PEER_ID,
+    toPeerId,
+    signalType,
+    data,
+    nickname: getNickname()
+  });
+}
+
+function waitForIceGatheringComplete(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ICE_TIMEOUT_MS);
+    function done() {
+      clearTimeout(timer);
+      pc.removeEventListener('icegatheringstatechange', onChange);
+      resolve();
+    }
+    function onChange() {
+      if (pc.iceGatheringState === 'complete') done();
+    }
+    pc.addEventListener('icegatheringstatechange', onChange);
+  });
+}
+
+function setupDataChannel(remotePeerId, channel) {
+  channel.binaryType = 'arraybuffer';
+  channel.bufferedAmountLowThreshold = 512 * 1024;
+  dataChannels.set(remotePeerId, channel);
+
+  channel.addEventListener('open', () => {
+    addTransferStatus({
+      id: `connection-${remotePeerId}`,
+      direction: '连接',
+      name: peerName(remotePeerId),
+      status: 'P2P 通道已建立',
+      progress: 100
+    });
+  });
+
+  channel.addEventListener('close', () => {
+    if (dataChannels.get(remotePeerId) === channel) dataChannels.delete(remotePeerId);
+  });
+
+  channel.addEventListener('error', () => {
+    showNotice(`与 ${peerName(remotePeerId)} 的 P2P 通道发生错误`, 'error', 4000);
+  });
+
+  channel.addEventListener('message', (event) => handleDataMessage(remotePeerId, event.data));
+}
+
+function createPeerConnection(remotePeerId, { initiator = false } = {}) {
+  const old = peerConnections.get(remotePeerId);
+  if (old && old.connectionState !== 'closed' && old.connectionState !== 'failed') {
+    return old;
+  }
+
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  peerConnections.set(remotePeerId, pc);
+
+  pc.addEventListener('datachannel', (event) => setupDataChannel(remotePeerId, event.channel));
+
+  pc.addEventListener('connectionstatechange', () => {
+    if (pc.connectionState === 'failed') {
+      showNotice(`无法与 ${peerName(remotePeerId)} 建立直连。可能是 NAT/防火墙限制。`, 'error', 5000);
+      closePeer(remotePeerId, false);
+    }
+    if (pc.connectionState === 'closed') closePeer(remotePeerId, false);
+  });
+
+  if (initiator) {
+    const channel = pc.createDataChannel('p2p-files', { ordered: true });
+    setupDataChannel(remotePeerId, channel);
+  }
+
+  return pc;
+}
+
+function closePeer(remotePeerId, sendBye = true) {
+  const channel = dataChannels.get(remotePeerId);
+  if (channel) {
+    try { channel.close(); } catch {}
+    dataChannels.delete(remotePeerId);
+  }
+
+  const pc = peerConnections.get(remotePeerId);
+  if (pc) {
+    try { pc.close(); } catch {}
+    peerConnections.delete(remotePeerId);
+  }
+
+  incomingTransfers.delete(remotePeerId);
+  if (sendBye) sendSignal(remotePeerId, 'bye').catch(() => {});
+}
+
+async function establishConnection(remotePeerId) {
+  if (!window.RTCPeerConnection) throw new Error('当前浏览器不支持 WebRTC P2P');
+
+  const openChannel = dataChannels.get(remotePeerId);
+  if (openChannel?.readyState === 'open') return openChannel;
+
+  closePeer(remotePeerId, false);
+  const pc = createPeerConnection(remotePeerId, { initiator: true });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitForIceGatheringComplete(pc);
+
+  await sendSignal(remotePeerId, 'offer', {
+    type: pc.localDescription.type,
+    sdp: pc.localDescription.sdp
+  });
+
+  return waitForDataChannel(remotePeerId);
+}
+
+function waitForDataChannel(remotePeerId) {
+  const existing = dataChannels.get(remotePeerId);
+  if (existing?.readyState === 'open') return Promise.resolve(existing);
+
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const channel = dataChannels.get(remotePeerId);
+      if (channel?.readyState === 'open') {
+        clearInterval(timer);
+        resolve(channel);
+        return;
+      }
+
+      const pc = peerConnections.get(remotePeerId);
+      if (pc?.connectionState === 'failed' || Date.now() - started > CONNECTION_TIMEOUT_MS) {
+        clearInterval(timer);
+        reject(new Error(`与 ${peerName(remotePeerId)} 建立 P2P 连接超时`));
+      }
+    }, 120);
+  });
+}
+
+async function handleSignal(signal) {
+  if (!signal?.id || processedSignals.has(signal.id)) return;
+  boostPolling(18000);
+  processedSignals.add(signal.id);
+  if (processedSignals.size > 3000) processedSignals.clear();
+
+  const remotePeerId = signal.fromPeerId;
+  if (!remotePeerId || remotePeerId === SELF_PEER_ID) return;
+
+  if (signal.signalType === 'bye') {
+    closePeer(remotePeerId, false);
+    return;
+  }
+
+  try {
+    if (signal.signalType === 'offer') {
+      // 如果双方同时发起，统一由 peerId 较小的一方保留主动 offer，避免 offer 碰撞。
+      const existing = peerConnections.get(remotePeerId);
+      if (existing && existing.signalingState !== 'stable') {
+        if (SELF_PEER_ID < remotePeerId) return;
+        closePeer(remotePeerId, false);
+      }
+
+      const pc = createPeerConnection(remotePeerId);
+      await pc.setRemoteDescription(signal.data);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceGatheringComplete(pc);
+      await sendSignal(remotePeerId, 'answer', {
+        type: pc.localDescription.type,
+        sdp: pc.localDescription.sdp
+      });
+      return;
+    }
+
+    if (signal.signalType === 'answer') {
+      const pc = peerConnections.get(remotePeerId);
+      if (!pc || pc.signalingState === 'closed') return;
+      if (!pc.remoteDescription) await pc.setRemoteDescription(signal.data);
+    }
+  } catch (error) {
+    console.error('P2P signaling failed', error);
+    showNotice(`P2P 握手失败：${error.message}`, 'error', 4500);
+    closePeer(remotePeerId, false);
+  }
+}
+
+function addTransferStatus({ id, direction, name, status, progress = 0, blob = null, fileType = '', fileName = '' }) {
+  let item = el.transferList.querySelector(`[data-transfer-id="${CSS.escape(id)}"]`);
+  if (!item) {
+    item = document.createElement('div');
+    item.className = 'transfer-item';
+    item.dataset.transferId = id;
+    item.innerHTML = `
+      <div class="transfer-main">
+        <div class="transfer-title"></div>
+        <div class="transfer-status"></div>
+      </div>
+      <div class="transfer-progress"><i></i></div>
+      <div class="transfer-actions"></div>
+    `;
+    el.transferList.prepend(item);
+  }
+
+  item.querySelector('.transfer-title').textContent = `${direction} · ${name}`;
+  item.querySelector('.transfer-status').textContent = status;
+  item.querySelector('.transfer-progress i').style.width = `${Math.max(0, Math.min(100, progress))}%`;
+
+  if (blob) {
+    const actions = item.querySelector('.transfer-actions');
+    actions.replaceChildren();
+
+    const url = URL.createObjectURL(blob);
+    const download = document.createElement('a');
+    download.className = 'download-link';
+    download.href = url;
+    download.download = fileName || name;
+    download.textContent = '下载';
+    actions.appendChild(download);
+
+    if (fileType.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.className = 'transfer-preview';
+      img.src = url;
+      img.alt = fileName || name;
+      actions.appendChild(img);
+    } else if (fileType.startsWith('video/')) {
+      const video = document.createElement('video');
+      video.className = 'transfer-preview video';
+      video.src = url;
+      video.controls = true;
+      video.preload = 'metadata';
+      actions.appendChild(video);
+    }
+  }
+}
+
+async function waitForBuffer(channel) {
+  if (channel.bufferedAmount <= MAX_BUFFERED_AMOUNT) return;
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('P2P 发送缓冲等待超时'));
+    }, 20000);
+
+    function cleanup() {
+      clearTimeout(timeout);
+      channel.removeEventListener('bufferedamountlow', onLow);
+      channel.removeEventListener('close', onClose);
+    }
+    function onLow() {
+      cleanup();
+      resolve();
+    }
+    function onClose() {
+      cleanup();
+      reject(new Error('P2P 通道已关闭'));
+    }
+
+    channel.addEventListener('bufferedamountlow', onLow, { once: true });
+    channel.addEventListener('close', onClose, { once: true });
+  });
+}
+
+async function sendOneFile(remotePeerId, file) {
+  const channel = await establishConnection(remotePeerId);
+  const transferId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+
+  channel.send(JSON.stringify({
+    kind: 'file-meta',
+    id: transferId,
+    name: file.name,
+    size: file.size,
+    type: file.type || 'application/octet-stream',
+    lastModified: file.lastModified || 0
+  }));
+
+  addTransferStatus({
+    id: transferId,
+    direction: '发送',
+    name: file.name,
+    status: `给 ${peerName(remotePeerId)} · 0 / ${formatBytes(file.size)}`,
+    progress: 0
+  });
+
+  let offset = 0;
+  while (offset < file.size) {
+    if (channel.readyState !== 'open') throw new Error('P2P 通道已断开');
+    await waitForBuffer(channel);
+
+    const end = Math.min(offset + FILE_CHUNK_SIZE, file.size);
+    const chunk = await file.slice(offset, end).arrayBuffer();
+    channel.send(chunk);
+    offset = end;
+
+    const progress = file.size ? (offset / file.size) * 100 : 100;
+    addTransferStatus({
+      id: transferId,
+      direction: '发送',
+      name: file.name,
+      status: `给 ${peerName(remotePeerId)} · ${formatBytes(offset)} / ${formatBytes(file.size)}`,
+      progress
+    });
+  }
+
+  channel.send(JSON.stringify({ kind: 'file-end', id: transferId }));
+  addTransferStatus({
+    id: transferId,
+    direction: '发送',
+    name: file.name,
+    status: `已发送给 ${peerName(remotePeerId)} · ${formatBytes(file.size)}`,
+    progress: 100
+  });
+}
+
+function queueFileSend(remotePeerId, file) {
+  const previous = outgoingQueues.get(remotePeerId) || Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => sendOneFile(remotePeerId, file));
+
+  outgoingQueues.set(remotePeerId, next);
+  next.finally(() => {
+    if (outgoingQueues.get(remotePeerId) === next) outgoingQueues.delete(remotePeerId);
+  });
+  return next;
+}
+
+async function handleDataMessage(remotePeerId, data) {
+  if (typeof data === 'string') {
+    let packet;
+    try { packet = JSON.parse(data); } catch { return; }
+
+    if (packet.kind === 'file-meta') {
+      incomingTransfers.set(remotePeerId, {
+        id: packet.id,
+        name: String(packet.name || 'unnamed-file'),
+        size: Number(packet.size) || 0,
+        type: String(packet.type || 'application/octet-stream'),
+        chunks: [],
+        received: 0
+      });
+
+      addTransferStatus({
+        id: packet.id,
+        direction: '接收',
+        name: packet.name,
+        status: `来自 ${peerName(remotePeerId)} · 0 / ${formatBytes(packet.size)}`,
+        progress: 0
+      });
+      return;
+    }
+
+    if (packet.kind === 'file-end') {
+      const transfer = incomingTransfers.get(remotePeerId);
+      if (!transfer || transfer.id !== packet.id) return;
+
+      const blob = new Blob(transfer.chunks, { type: transfer.type });
+      const complete = transfer.size === 0 || blob.size === transfer.size;
+      addTransferStatus({
+        id: transfer.id,
+        direction: '接收',
+        name: transfer.name,
+        status: complete
+          ? `接收完成 · ${formatBytes(blob.size)} · 点击下载`
+          : `大小校验异常：收到 ${formatBytes(blob.size)} / 应为 ${formatBytes(transfer.size)}`,
+        progress: 100,
+        blob,
+        fileType: transfer.type,
+        fileName: transfer.name
+      });
+
+      incomingTransfers.delete(remotePeerId);
+      if (complete) showNotice(`已收到文件：${transfer.name}`, 'success', 4000);
+      return;
+    }
+
+    return;
+  }
+
+  const transfer = incomingTransfers.get(remotePeerId);
+  if (!transfer) return;
+
+  const chunk = data instanceof ArrayBuffer ? data : await data.arrayBuffer();
+  transfer.chunks.push(chunk);
+  transfer.received += chunk.byteLength;
+  const progress = transfer.size ? (transfer.received / transfer.size) * 100 : 100;
+
+  addTransferStatus({
+    id: transfer.id,
+    direction: '接收',
+    name: transfer.name,
+    status: `来自 ${peerName(remotePeerId)} · ${formatBytes(transfer.received)} / ${formatBytes(transfer.size)}`,
+    progress
+  });
+}
+
 async function syncMessages({ quiet = false } = {}) {
   if (requestInFlight) return;
   requestInFlight = true;
 
   try {
-    const response = await fetch(`${API}?t=${Date.now()}`, { cache: 'no-store' });
+    const params = new URLSearchParams({
+      t: String(Date.now()),
+      peerId: SELF_PEER_ID,
+      nickname: getNickname()
+    });
+    const response = await fetch(`${API}?${params}`, { cache: 'no-store' });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '同步失败');
 
@@ -209,6 +750,12 @@ async function syncMessages({ quiet = false } = {}) {
     }
 
     messages = mergeMessages(messages, data.messages);
+    renderPeers(data.peers);
+
+    for (const signal of Array.isArray(data.signals) ? data.signals : []) {
+      await handleSignal(signal);
+    }
+
     render();
   } catch (error) {
     if (!quiet) showNotice(`暂时无法同步服务器：${error.message}`, 'error', 4000);
@@ -293,6 +840,7 @@ el.input.addEventListener('keydown', async (event) => {
 
 el.nickname.addEventListener('change', () => {
   localStorage.setItem(NICKNAME_KEY, el.nickname.value.trim());
+  syncMessages({ quiet: true });
 });
 
 el.adminBtn.addEventListener('click', () => {
@@ -330,10 +878,11 @@ el.exportBtn.addEventListener('click', async () => {
     const exported = {
       ...data,
       source: 'server-memory+browser-cache',
+      note: 'P2P 文件二进制不会写入 JSON。',
       messages: merged
     };
     downloadJson(exported);
-    showNotice(`已导出 ${merged.length} 条消息`, 'success');
+    showNotice(`已导出 ${merged.length} 条文字消息`, 'success');
   } catch (error) {
     showNotice(error.message, 'error');
   }
@@ -344,9 +893,7 @@ el.importInput.addEventListener('change', async () => {
   if (!file) return;
 
   try {
-    if (file.size > 2 * 1024 * 1024) {
-      throw new Error('导入文件不能超过 2MB');
-    }
+    if (file.size > 2 * 1024 * 1024) throw new Error('导入文件不能超过 2MB');
 
     const parsed = JSON.parse(await file.text());
     const data = await request({
@@ -379,18 +926,54 @@ el.clearBtn.addEventListener('click', async () => {
   }
 });
 
+el.p2pFileInput.addEventListener('change', () => {
+  selectedP2PFiles = [...(el.p2pFileInput.files || [])];
+  renderSelectedFiles();
+});
+
+el.peerSelect.addEventListener('change', updateSendFileButton);
+
+el.sendFileBtn.addEventListener('click', async () => {
+  if (!selectedP2PFiles.length) return;
+
+  const target = el.peerSelect.value;
+  const targets = target === '*' ? peers.map((peer) => peer.id) : [target].filter(Boolean);
+  if (!targets.length) {
+    showNotice('请选择在线接收者', 'error');
+    return;
+  }
+
+  el.sendFileBtn.disabled = true;
+  boostPolling(35000);
+  const files = [...selectedP2PFiles];
+  try {
+    for (const remotePeerId of targets) {
+      for (const file of files) {
+        await queueFileSend(remotePeerId, file);
+      }
+    }
+    showNotice(`P2P 文件发送完成`, 'success', 3500);
+    selectedP2PFiles = [];
+    el.p2pFileInput.value = '';
+    renderSelectedFiles();
+  } catch (error) {
+    showNotice(`文件发送失败：${error.message}`, 'error', 5200);
+  } finally {
+    updateSendFileButton();
+  }
+});
+
+async function pollLoop() {
+  await syncMessages({ quiet: true });
+  schedulePoll();
+}
+
 function startTimers() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(() => syncMessages({ quiet: true }), POLL_MS);
+  schedulePoll(1000);
 
   setInterval(() => {
-    const before = messages.length;
     messages = pruneExpired(messages);
-    if (messages.length !== before) render();
-    else {
-      // 即使没有消息被删除，也刷新“还有几分钟删除”的文案。
-      render();
-    }
+    render();
   }, 15_000);
 }
 
@@ -398,10 +981,21 @@ function init() {
   el.nickname.value = localStorage.getItem(NICKNAME_KEY) || '';
   loadCache();
   setAdminUi();
+  renderSelectedFiles();
+  renderPeers([]);
   render({ stickToBottom: true });
   syncMessages({ quiet: true });
   startTimers();
   el.input.focus();
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) syncMessages({ quiet: true });
+  schedulePoll(document.hidden ? HIDDEN_POLL_MS : 250);
+});
+
+window.addEventListener('beforeunload', () => {
+  for (const peerId of peerConnections.keys()) closePeer(peerId, false);
+});
 
 init();

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="部署在 Vercel 的临时聊天室，访客消息 30 分钟自动过期。" />
+  <meta name="description" content="部署在 Vercel 的临时聊天室，访客消息 30 分钟自动过期，文件通过 WebRTC P2P 直传。" />
   <title>临时聊天室</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -13,7 +13,7 @@
       <header class="topbar">
         <div>
           <h1>临时聊天室</h1>
-          <p>访客消息保存 30 分钟 · 无数据库 · 无 Redis</p>
+          <p>访客消息 30 分钟 · 文件 WebRTC P2P 直传 · 无数据库 / Redis</p>
         </div>
         <div class="top-actions">
           <span id="statusBadge" class="badge visitor">访客</span>
@@ -38,6 +38,30 @@
 
       <section id="messages" class="messages" aria-live="polite"></section>
 
+      <section class="p2p-panel" aria-label="P2P 文件传输">
+        <div class="p2p-head">
+          <div>
+            <strong>P2P 文件直传</strong>
+            <span id="peerCount" class="peer-count">0 个其他在线用户</span>
+          </div>
+          <span class="p2p-tag">不上传 Vercel</span>
+        </div>
+
+        <div class="p2p-controls">
+          <select id="peerSelect" aria-label="选择文件接收者">
+            <option value="">暂无其他在线用户</option>
+          </select>
+          <label class="btn secondary file-btn attach-btn">
+            选择文件
+            <input id="p2pFileInput" type="file" multiple hidden />
+          </label>
+          <button id="sendFileBtn" class="btn primary" type="button" disabled>发送文件</button>
+        </div>
+        <div id="selectedFiles" class="selected-files">可发送图片、视频、ZIP/RAR/7z、DMG、EXE、APK 等任意文件。</div>
+        <div class="p2p-hint">接收者必须在线。文件仅存在于双方浏览器内存/下载文件中，不写入聊天 JSON 或 localStorage。无 TURN 中继，部分严格 NAT/公司网络可能无法直连。</div>
+        <div id="transferList" class="transfer-list"></div>
+      </section>
+
       <form id="messageForm" class="composer">
         <div class="composer-row">
           <input
@@ -57,7 +81,7 @@
           required
         ></textarea>
         <div class="composer-footer">
-          <span class="hint">服务器会在读取/发送时清理过期访客消息；页面本地也会定时清理。</span>
+          <span class="hint">文字消息会按规则清理；文件使用浏览器间 WebRTC DataChannel 实时直传。</span>
           <button id="sendBtn" class="btn primary" type="submit">发送</button>
         </div>
       </form>

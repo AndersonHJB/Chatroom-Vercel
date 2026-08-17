@@ -22,7 +22,7 @@ body {
   color: var(--text);
 }
 
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 
 .app-shell {
   min-height: 100vh;
@@ -32,9 +32,9 @@ button, input, textarea { font: inherit; }
 }
 
 .chat-card {
-  width: min(960px, 100%);
-  height: min(820px, calc(100vh - 56px));
-  min-height: 620px;
+  width: min(1000px, 100%);
+  height: min(900px, calc(100vh - 56px));
+  min-height: 680px;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 24px;
@@ -81,7 +81,7 @@ h1 { margin: 0 0 5px; font-size: 22px; }
 .btn.secondary { background: #f3f4f6; color: #111827; }
 .btn.ghost { background: transparent; color: var(--muted); }
 .btn.danger { background: #fee2e2; color: #b91c1c; }
-.file-btn { display: inline-flex; align-items: center; }
+.file-btn { display: inline-flex; align-items: center; justify-content: center; }
 
 .admin-panel {
   padding: 12px 24px;
@@ -152,9 +152,60 @@ h1 { margin: 0 0 5px; font-size: 22px; }
 }
 .expire { font-size: 11px; color: #9ca3af; }
 
+.p2p-panel {
+  border-top: 1px solid var(--line);
+  padding: 13px 20px;
+  background: #f8fbff;
+}
+.p2p-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.p2p-head strong { font-size: 13px; }
+.peer-count { margin-left: 8px; color: var(--muted); font-size: 11px; }
+.p2p-tag {
+  color: #047857;
+  background: #d1fae5;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.p2p-controls { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; gap: 8px; }
+select {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text);
+  padding: 9px 11px;
+  outline: none;
+}
+.selected-files { margin-top: 8px; color: #374151; font-size: 11px; overflow-wrap: anywhere; }
+.p2p-hint { margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.transfer-list { margin-top: 9px; display: flex; flex-direction: column; gap: 7px; max-height: 180px; overflow: auto; }
+.transfer-item {
+  border: 1px solid #dbeafe;
+  background: #fff;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.transfer-main { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; }
+.transfer-title { font-weight: 800; min-width: 0; overflow-wrap: anywhere; }
+.transfer-status { color: var(--muted); text-align: right; }
+.transfer-progress { height: 4px; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin-top: 6px; }
+.transfer-progress i { display: block; height: 100%; width: 0; background: currentColor; color: #111827; transition: width .1s linear; }
+.transfer-actions { margin-top: 7px; display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+.download-link { font-size: 11px; font-weight: 800; color: #1d4ed8; text-decoration: none; padding: 5px 8px; background: #eff6ff; border-radius: 7px; }
+.transfer-preview { max-width: 220px; max-height: 130px; object-fit: contain; border-radius: 8px; border: 1px solid var(--line); }
+.transfer-preview.video { width: 220px; }
+
 .composer {
   border-top: 1px solid var(--line);
-  padding: 16px 20px 18px;
+  padding: 14px 20px 16px;
   background: #fff;
 }
 .composer-row { display: flex; align-items: center; gap: 12px; margin-bottom: 9px; }
@@ -169,7 +220,7 @@ input, textarea {
   color: var(--text);
   outline: none;
 }
-input:focus, textarea:focus { border-color: #6b7280; box-shadow: 0 0 0 3px rgba(17, 24, 39, .06); }
+input:focus, textarea:focus, select:focus { border-color: #6b7280; box-shadow: 0 0 0 3px rgba(17, 24, 39, .06); }
 textarea { resize: none; line-height: 1.5; }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 10px; }
 .hint { color: var(--muted); font-size: 11px; }
@@ -190,12 +241,17 @@ textarea { resize: none; line-height: 1.5; }
   .app-shell { padding: 0; }
   .chat-card { height: 100vh; min-height: 100vh; border-radius: 0; border: 0; }
   .topbar { padding: 16px; align-items: flex-start; }
-  .topbar p { max-width: 210px; }
+  .topbar p { max-width: 230px; }
   .top-actions { justify-content: flex-end; }
   .admin-panel { padding: 10px 16px; align-items: flex-start; flex-direction: column; }
   .messages { padding: 18px 14px; }
   .message { max-width: 88%; }
+  .p2p-panel { padding: 11px 12px; }
+  .p2p-controls { grid-template-columns: 1fr 1fr; }
+  .p2p-controls select { grid-column: 1 / -1; }
   .composer { padding: 12px; }
   .hint { display: none; }
   .nickname-input { width: 145px; }
+  .transfer-main { flex-direction: column; gap: 3px; }
+  .transfer-status { text-align: left; }
 }

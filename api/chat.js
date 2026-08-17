@@ -1,15 +1,26 @@
 import crypto from 'node:crypto';
 
 const VISITOR_TTL_MS = 30 * 60 * 1000;
+const PEER_TTL_MS = 20 * 1000;
+const SIGNAL_TTL_MS = 2 * 60 * 1000;
 const MAX_MESSAGES = 500;
+const MAX_SIGNALS = 1500;
 const MAX_NAME_LENGTH = 30;
 const MAX_CONTENT_LENGTH = 2000;
+const MAX_SIGNAL_BYTES = 120 * 1024;
 
 // 注意：这里只存在当前 Vercel Function 实例的内存里。
 // 冷启动、扩容、重新部署都可能让它消失；这是“完全不使用存储”的必然限制。
 const state = globalThis.__TEMP_CHAT_STATE__ || {
-  messages: []
+  messages: [],
+  peers: {},
+  signals: []
 };
+
+// 兼容旧版本热实例。
+state.messages ||= [];
+state.peers ||= {};
+state.signals ||= [];
 
 globalThis.__TEMP_CHAT_STATE__ = state;
 
@@ -17,17 +28,35 @@ function now() {
   return Date.now();
 }
 
-function cleanupExpired() {
+function normalizeText(value, maxLength) {
+  return String(value ?? '').replace(/\u0000/g, '').trim().slice(0, maxLength);
+}
+
+function normalizePeerId(value) {
+  const id = String(value ?? '').trim();
+  return /^[a-zA-Z0-9_-]{8,80}$/.test(id) ? id : '';
+}
+
+function cleanupState() {
   const t = now();
+
   state.messages = state.messages.filter((message) => {
-    // 管理员消息 expiresAt === null，不按 30 分钟删除。
     if (message.expiresAt === null) return true;
     return Number(message.expiresAt) > t;
   });
-
   if (state.messages.length > MAX_MESSAGES) {
     state.messages = state.messages.slice(-MAX_MESSAGES);
   }
+
+  for (const [peerId, peer] of Object.entries(state.peers)) {
+    if (!peer || Number(peer.lastSeen) + PEER_TTL_MS <= t) {
+      delete state.peers[peerId];
+    }
+  }
+
+  state.signals = state.signals
+    .filter((signal) => Number(signal.createdAt) + SIGNAL_TTL_MS > t)
+    .slice(-MAX_SIGNALS);
 }
 
 function isAdmin(req) {
@@ -56,13 +85,30 @@ function json(res, status, body) {
   return res.status(status).json(body);
 }
 
-function normalizeText(value, maxLength) {
-  return String(value ?? '').replace(/\u0000/g, '').trim().slice(0, maxLength);
+function publicMessages() {
+  cleanupState();
+  return [...state.messages].sort((a, b) => a.createdAt - b.createdAt);
 }
 
-function publicMessages() {
-  cleanupExpired();
-  return [...state.messages].sort((a, b) => a.createdAt - b.createdAt);
+function publicPeers(exceptPeerId = '') {
+  cleanupState();
+  return Object.values(state.peers)
+    .filter((peer) => peer.id !== exceptPeerId)
+    .map((peer) => ({
+      id: peer.id,
+      nickname: peer.nickname,
+      lastSeen: peer.lastSeen
+    }))
+    .sort((a, b) => a.nickname.localeCompare(b.nickname, 'zh-CN'));
+}
+
+function touchPeer(peerId, nickname) {
+  if (!peerId) return;
+  state.peers[peerId] = {
+    id: peerId,
+    nickname: normalizeText(nickname, MAX_NAME_LENGTH) || '匿名访客',
+    lastSeen: now()
+  };
 }
 
 function sanitizeImportedMessage(raw) {
@@ -83,7 +129,6 @@ function sanitizeImportedMessage(raw) {
       ? requestedExpiresAt
       : safeCreatedAt + VISITOR_TTL_MS;
 
-    // 已经过期的访客消息不导入。
     if (expiresAt <= now()) return null;
   }
 
@@ -98,14 +143,27 @@ function sanitizeImportedMessage(raw) {
 }
 
 export default async function handler(req, res) {
-  cleanupExpired();
+  cleanupState();
 
   if (req.method === 'GET') {
+    const peerId = normalizePeerId(req.query?.peerId);
+    const nickname = normalizeText(req.query?.nickname, MAX_NAME_LENGTH);
+    touchPeer(peerId, nickname);
+
+    const signals = peerId
+      ? state.signals
+          .filter((signal) => signal.toPeerId === peerId)
+          .map((signal) => ({ ...signal }))
+      : [];
+
     return json(res, 200, {
       ok: true,
       messages: publicMessages(),
+      peers: publicPeers(peerId),
+      signals,
       serverTime: now(),
-      visitorTtlMs: VISITOR_TTL_MS
+      visitorTtlMs: VISITOR_TTL_MS,
+      peerTtlMs: PEER_TTL_MS
     });
   }
 
@@ -150,13 +208,48 @@ export default async function handler(req, res) {
     };
 
     state.messages.push(message);
-    cleanupExpired();
+    cleanupState();
 
     return json(res, 201, {
       ok: true,
       message,
       messages: publicMessages()
     });
+  }
+
+  // WebRTC 只通过 Vercel 交换很小的 SDP 信令；文件二进制不经过这里。
+  if (action === 'signal') {
+    const fromPeerId = normalizePeerId(body.fromPeerId);
+    const toPeerId = normalizePeerId(body.toPeerId);
+    const signalType = String(body.signalType ?? '');
+
+    if (!fromPeerId || !toPeerId || fromPeerId === toPeerId) {
+      return json(res, 400, { ok: false, error: 'P2P 节点参数无效' });
+    }
+    if (!['offer', 'answer', 'bye'].includes(signalType)) {
+      return json(res, 400, { ok: false, error: '不支持的 P2P 信令类型' });
+    }
+
+    const serialized = JSON.stringify(body.data ?? null);
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_SIGNAL_BYTES) {
+      return json(res, 413, { ok: false, error: 'P2P 信令数据过大' });
+    }
+
+    touchPeer(fromPeerId, body.nickname);
+
+    const signal = {
+      id: crypto.randomUUID(),
+      fromPeerId,
+      toPeerId,
+      signalType,
+      data: body.data ?? null,
+      createdAt: now()
+    };
+
+    state.signals.push(signal);
+    cleanupState();
+
+    return json(res, 201, { ok: true, signalId: signal.id });
   }
 
   // 以下操作只允许管理员。
@@ -168,7 +261,7 @@ export default async function handler(req, res) {
     return json(res, 200, {
       ok: true,
       exportedAt: new Date().toISOString(),
-      version: 1,
+      version: 2,
       messages: publicMessages()
     });
   }
@@ -189,7 +282,6 @@ export default async function handler(req, res) {
       .map(sanitizeImportedMessage)
       .filter(Boolean);
 
-    // 按 id 合并，导入的数据覆盖同 id 的旧记录。
     const map = new Map(state.messages.map((m) => [m.id, m]));
     for (const message of imported) map.set(message.id, message);
 
@@ -197,7 +289,7 @@ export default async function handler(req, res) {
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(-MAX_MESSAGES);
 
-    cleanupExpired();
+    cleanupState();
 
     return json(res, 200, {
       ok: true,
