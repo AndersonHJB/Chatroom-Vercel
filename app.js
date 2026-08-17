@@ -6,6 +6,7 @@ const PEER_ID_KEY = 'vercel-temp-chat:peer-id:v1';
 const VISIBLE_POLL_MS = 10000;
 const HIDDEN_POLL_MS = 60000;
 const ADMIN_HIDDEN_POLL_MS = 15000;
+const MESSAGE_TTL_MS = 3 * 60 * 1000;
 const FAST_POLL_MS = 1000;
 const FILE_CHUNK_SIZE = 64 * 1024;
 const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024;
@@ -110,9 +111,19 @@ function approximateServerNow() {
   return Date.now() + serverClockOffset;
 }
 
+function getMessageExpiresAt(message) {
+  const explicit = Number(message?.expiresAt);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+  // 兼容旧版本：管理员消息以前 expiresAt === null。
+  // 新版所有消息统一按 createdAt + 3 分钟过期，旧管理员消息也不会永久保留。
+  const createdAt = Number(message?.createdAt);
+  return (Number.isFinite(createdAt) ? createdAt : 0) + MESSAGE_TTL_MS;
+}
+
 function pruneExpired(list) {
   const t = approximateServerNow();
-  return list.filter((message) => message.expiresAt === null || Number(message.expiresAt) > t);
+  return list.filter((message) => getMessageExpiresAt(message) > t);
 }
 
 function mergeMessages(...groups) {
@@ -164,11 +175,12 @@ function formatBytes(bytes) {
   return `${n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit}`;
 }
 
-function formatRemaining(expiresAt) {
-  if (expiresAt === null) return '管理员消息';
-  const remaining = Math.max(0, Number(expiresAt) - approximateServerNow());
-  const minutes = Math.ceil(remaining / 60000);
-  return minutes > 0 ? `约 ${minutes} 分钟后删除` : '即将删除';
+function formatRemaining(message) {
+  const remaining = Math.max(0, getMessageExpiresAt(message) - approximateServerNow());
+  const seconds = Math.ceil(remaining / 1000);
+  if (seconds <= 0) return '即将删除';
+  if (seconds < 60) return `约 ${seconds} 秒后删除`;
+  return `约 ${Math.ceil(seconds / 60)} 分钟后删除`;
 }
 
 function render({ stickToBottom = false } = {}) {
@@ -216,7 +228,7 @@ function render({ stickToBottom = false } = {}) {
 
     const expire = document.createElement('div');
     expire.className = 'expire';
-    expire.textContent = formatRemaining(message.expiresAt);
+    expire.textContent = formatRemaining(message);
 
     item.append(meta, bubble, expire);
     el.messages.appendChild(item);
@@ -248,7 +260,7 @@ function setInteractionEnabled(enabled) {
 
 function startLocalTimers() {
   if (maintenanceTimer) return;
-  // 始终运行：只负责浏览器本地 30 分钟过期清理。
+  // 始终运行：只负责浏览器本地 3 分钟过期清理（管理员和访客统一）。
   // 这里没有 fetch / API / 网络请求，因此不会消耗 Vercel Function、Edge Request 或流量。
   maintenanceTimer = setInterval(() => {
     const before = messages.length;
@@ -1227,7 +1239,7 @@ function init() {
   render({ stickToBottom: true });
 
   // 关键：初始化阶段不 fetch、不轮询、不心跳、不注册 peer。
-  // 但启动一个纯浏览器本地 interval，用于删除 localStorage 中超过 30 分钟的访客消息。
+  // 但启动一个纯浏览器本地 interval，用于删除 localStorage 中超过 3 分钟的所有消息。
   // 该定时器不产生任何网络请求，因此不消耗 Vercel 资源。
   startLocalTimers();
   // 访客点“进入聊天室”或管理员提交密码后，才发生第一次 API 请求。

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-const VISITOR_TTL_MS = 30 * 60 * 1000;
+const MESSAGE_TTL_MS = 3 * 60 * 1000;
 const PEER_TTL_MS = 20 * 1000;
 const SIGNAL_TTL_MS = 2 * 60 * 1000;
 const ADMIN_ONLINE_TTL_MS = 35 * 1000;
@@ -44,8 +44,13 @@ function cleanupState() {
   const t = now();
 
   state.messages = state.messages.filter((message) => {
-    if (message.expiresAt === null) return true;
-    return Number(message.expiresAt) > t;
+    const explicit = Number(message.expiresAt);
+    const createdAt = Number(message.createdAt);
+    // 兼容旧热实例：旧管理员消息 expiresAt 为 null，按 createdAt + 3 分钟处理。
+    const expiresAt = Number.isFinite(explicit) && explicit > 0
+      ? explicit
+      : (Number.isFinite(createdAt) ? createdAt : 0) + MESSAGE_TTL_MS;
+    return expiresAt > t;
   });
   if (state.messages.length > MAX_MESSAGES) {
     state.messages = state.messages.slice(-MAX_MESSAGES);
@@ -138,15 +143,9 @@ function sanitizeImportedMessage(raw) {
   const createdAt = Number(raw.createdAt);
   const safeCreatedAt = Number.isFinite(createdAt) ? createdAt : now();
 
-  let expiresAt = null;
-  if (role === 'visitor') {
-    const requestedExpiresAt = Number(raw.expiresAt);
-    expiresAt = Number.isFinite(requestedExpiresAt)
-      ? requestedExpiresAt
-      : safeCreatedAt + VISITOR_TTL_MS;
-
-    if (expiresAt <= now()) return null;
-  }
+  // 导入记录也统一只保留 3 分钟。不能通过 JSON 导入延长消息寿命。
+  const expiresAt = safeCreatedAt + MESSAGE_TTL_MS;
+  if (expiresAt <= now()) return null;
 
   return {
     id: typeof raw.id === 'string' && raw.id.length <= 100 ? raw.id : crypto.randomUUID(),
@@ -188,7 +187,7 @@ export default async function handler(req, res) {
         peers: [],
         signals: [],
         serverTime: now(),
-        visitorTtlMs: VISITOR_TTL_MS,
+        messageTtlMs: MESSAGE_TTL_MS,
         peerTtlMs: PEER_TTL_MS,
         adminOnlineTtlMs: ADMIN_ONLINE_TTL_MS
       });
@@ -212,7 +211,7 @@ export default async function handler(req, res) {
       peers: publicPeers(peerId),
       signals,
       serverTime: now(),
-      visitorTtlMs: VISITOR_TTL_MS,
+      messageTtlMs: MESSAGE_TTL_MS,
       peerTtlMs: PEER_TTL_MS,
       adminOnlineTtlMs: ADMIN_ONLINE_TTL_MS
     });
@@ -279,7 +278,7 @@ export default async function handler(req, res) {
       content,
       role: admin ? 'admin' : 'visitor',
       createdAt,
-      expiresAt: admin ? null : createdAt + VISITOR_TTL_MS
+      expiresAt: createdAt + MESSAGE_TTL_MS
     };
 
     state.messages.push(message);
