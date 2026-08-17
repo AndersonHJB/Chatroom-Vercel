@@ -270,3 +270,76 @@ textarea { resize: none; line-height: 1.5; }
   .transfer-main { flex-direction: column; gap: 3px; }
   .transfer-status { text-align: left; }
 }
+
+/* 待发送文件队列：选择 / 粘贴 / 拖拽都只在浏览器本地内存中操作。 */
+.paste-zone {
+  margin-top: 9px;
+  border: 1px dashed #9ca3af;
+  border-radius: 12px;
+  background: #fff;
+  padding: 11px 12px;
+  cursor: pointer;
+  outline: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+.paste-zone strong { font-size: 12px; white-space: nowrap; }
+.paste-zone span { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.paste-zone:hover,
+.paste-zone:focus,
+.paste-zone.dragging,
+.paste-zone.flash {
+  border-color: #111827;
+  background: #f9fafb;
+}
+.paste-zone.dragging { transform: scale(.998); }
+
+.file-queue {
+  margin-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 120px;
+  overflow: auto;
+}
+.file-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+}
+.file-queue-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.file-queue-info strong {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-queue-info span { color: var(--muted); font-size: 9px; }
+.file-remove {
+  border: 0;
+  background: #f3f4f6;
+  color: #6b7280;
+  border-radius: 7px;
+  padding: 5px 7px;
+  font-size: 10px;
+  cursor: pointer;
+  flex: none;
+}
+
+@media (max-width: 680px) {
+  .p2p-controls { grid-template-columns: 1fr 1fr; }
+  .p2p-controls select { grid-column: 1 / -1; }
+  .paste-zone { align-items: flex-start; flex-direction: column; gap: 4px; }
+}

@@ -17,7 +17,7 @@
         </div>
         <div class="top-actions">
           <span id="statusBadge" class="badge visitor">访客</span>
-          <button id="adminBtn" class="btn secondary" type="button">管理员登录</button>
+          <button id="adminBtn" class="btn secondary" type="button">管理员上线</button>
         </div>
       </header>
 
@@ -36,12 +36,12 @@
 
       <div id="notice" class="notice hidden"></div>
 
-      <section id="offlinePanel" class="offline-panel hidden" aria-live="polite">
+      <section id="offlinePanel" class="offline-panel" aria-live="polite">
         <div>
-          <strong>管理员当前离线，聊天室已暂停</strong>
-          <p>此状态不会自动轮询 Vercel。管理员上线后，请刷新页面或手动检查一次。</p>
+          <strong>聊天室当前处于静默状态</strong>
+          <p>页面加载后不会自动请求 API、轮询、心跳或 P2P 信令。访客只有主动进入时才检查一次管理员是否在线。</p>
         </div>
-        <button id="checkAdminBtn" class="btn secondary" type="button">检查管理员是否上线</button>
+        <button id="checkAdminBtn" class="btn secondary" type="button">进入聊天室</button>
       </section>
 
       <section id="messages" class="messages" aria-live="polite"></section>
@@ -63,10 +63,18 @@
             选择文件
             <input id="p2pFileInput" type="file" multiple hidden />
           </label>
+          <button id="clearFilesBtn" class="btn ghost" type="button" disabled>清空待发送</button>
           <button id="sendFileBtn" class="btn primary" type="button" disabled>发送文件</button>
         </div>
-        <div id="selectedFiles" class="selected-files">可发送图片、视频、ZIP/RAR/7z、DMG、EXE、APK 等任意文件。</div>
-        <div class="p2p-hint">接收者必须在线。文件仅存在于双方浏览器内存/下载文件中，不写入聊天 JSON 或 localStorage。无 TURN 中继，部分严格 NAT/公司网络可能无法直连。</div>
+
+        <div id="pasteZone" class="paste-zone" tabindex="0" role="button" aria-label="粘贴或拖入文件">
+          <strong>⌘/Ctrl + V 粘贴文件</strong>
+          <span>也可以把图片、视频、压缩包、安装包等任意文件拖到这里；加入队列后再选择接收者发送。</span>
+        </div>
+
+        <div id="selectedFiles" class="selected-files">尚未选择文件。支持任意浏览器能够提供为 File 对象的文件类型。</div>
+        <div id="fileQueue" class="file-queue" aria-live="polite"></div>
+        <div class="p2p-hint">文件本体通过 WebRTC DataChannel 浏览器直传，不上传 Vercel、不写入聊天 JSON/localStorage。剪贴板能否提供 EXE/DMG/APK 等文件取决于浏览器与操作系统；只要粘贴事件中能拿到 File，就按任意文件传输。</div>
         <div id="transferList" class="transfer-list"></div>
       </section>
 
@@ -99,7 +107,7 @@
   <dialog id="adminDialog" class="dialog">
     <form id="adminLoginForm" method="dialog" class="dialog-card">
       <div class="dialog-title">管理员登录</div>
-      <p>密码只保存在当前浏览器标签页的 sessionStorage 中。</p>
+      <p>验证成功即开启聊天室并开始轮询；刷新页面后默认重新回到静默状态。</p>
       <input id="adminPasswordInput" type="password" placeholder="输入管理员密码" autocomplete="current-password" required />
       <div class="dialog-actions">
         <button id="cancelAdminBtn" class="btn ghost" type="button">取消</button>

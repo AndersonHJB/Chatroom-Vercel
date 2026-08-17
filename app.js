@@ -45,8 +45,11 @@ const el = {
   peerSelect: document.querySelector('#peerSelect'),
   peerCount: document.querySelector('#peerCount'),
   p2pFileInput: document.querySelector('#p2pFileInput'),
+  clearFilesBtn: document.querySelector('#clearFilesBtn'),
   sendFileBtn: document.querySelector('#sendFileBtn'),
+  pasteZone: document.querySelector('#pasteZone'),
   selectedFiles: document.querySelector('#selectedFiles'),
+  fileQueue: document.querySelector('#fileQueue'),
   transferList: document.querySelector('#transferList')
 };
 
@@ -54,6 +57,7 @@ let messages = [];
 let serverClockOffset = 0;
 let noticeTimer = null;
 let pollTimer = null;
+let maintenanceTimer = null;
 let fastPollUntil = 0;
 let requestInFlight = false;
 let statusCheckInFlight = false;
@@ -224,20 +228,37 @@ function render({ stickToBottom = false } = {}) {
 }
 
 function setAdminUi() {
-  const admin = isAdmin();
+  const admin = isAdmin() && chatActive;
   el.adminPanel.classList.toggle('hidden', !admin);
-  el.statusBadge.textContent = admin ? '管理员在线' : (chatActive ? '访客在线' : '等待管理员');
+  el.statusBadge.textContent = admin ? '管理员在线' : (chatActive ? '访客在线' : '静默');
   el.statusBadge.className = `badge ${admin ? 'admin' : 'visitor'}`;
   el.adminBtn.classList.toggle('hidden', admin);
   el.nickname.placeholder = admin ? '管理员昵称' : '你的昵称';
 }
 
 function setInteractionEnabled(enabled) {
+  // 文字聊天与目标选择只有聊天室 ACTIVE 时启用。
+  // 文件“选择 / 粘贴 / 拖拽”只是本地操作，即使静默状态也允许先加入待发送队列。
   el.input.disabled = !enabled;
   el.sendBtn.disabled = !enabled;
-  el.p2pFileInput.disabled = !enabled;
   el.peerSelect.disabled = !enabled || peers.length === 0;
+  el.pasteZone.classList.toggle('inactive', false);
   updateSendFileButton();
+}
+
+function startLocalTimers() {
+  if (maintenanceTimer) return;
+  // 仅在聊天室 ACTIVE 时运行，且只清理浏览器本地缓存，不产生任何 Vercel 请求。
+  maintenanceTimer = setInterval(() => {
+    messages = pruneExpired(messages);
+    render();
+  }, 15_000);
+}
+
+function stopLocalTimers() {
+  if (!maintenanceTimer) return;
+  clearInterval(maintenanceTimer);
+  maintenanceTimer = null;
 }
 
 function setChatActive(active) {
@@ -245,10 +266,13 @@ function setChatActive(active) {
   clearTimeout(pollTimer);
   pollTimer = null;
 
-  el.offlinePanel.classList.toggle('hidden', chatActive || isAdmin());
+  el.offlinePanel.classList.toggle('hidden', chatActive);
   setInteractionEnabled(chatActive);
 
-  if (!chatActive) {
+  if (chatActive) {
+    startLocalTimers();
+  } else {
+    stopLocalTimers();
     fastPollUntil = 0;
     renderPeers([]);
     for (const peerId of [...peerConnections.keys()]) closePeer(peerId, false);
@@ -330,15 +354,80 @@ function renderPeers(nextPeers) {
 function updateSendFileButton() {
   const hasTarget = Boolean(el.peerSelect.value) && !el.peerSelect.disabled;
   el.sendFileBtn.disabled = !chatActive || !hasTarget || selectedP2PFiles.length === 0;
+  el.clearFilesBtn.disabled = selectedP2PFiles.length === 0;
+}
+
+function fileFingerprint(file) {
+  return `${file.name}::${file.size}::${file.lastModified || 0}::${file.type || ''}`;
+}
+
+function addFilesToQueue(fileList, source = '选择') {
+  const incoming = [...(fileList || [])].filter((file) => file instanceof File);
+  if (!incoming.length) return 0;
+
+  const existing = new Set(selectedP2PFiles.map(fileFingerprint));
+  let added = 0;
+  for (const file of incoming) {
+    const key = fileFingerprint(file);
+    if (existing.has(key)) continue;
+    existing.add(key);
+    selectedP2PFiles.push(file);
+    added += 1;
+  }
+
+  renderSelectedFiles();
+  if (added) showNotice(`${source}加入 ${added} 个文件，选择接收者后再发送`, 'success', 2600);
+  return added;
+}
+
+function removeQueuedFile(index) {
+  if (index < 0 || index >= selectedP2PFiles.length) return;
+  selectedP2PFiles.splice(index, 1);
+  renderSelectedFiles();
+}
+
+function clearQueuedFiles() {
+  selectedP2PFiles = [];
+  el.p2pFileInput.value = '';
+  renderSelectedFiles();
 }
 
 function renderSelectedFiles() {
+  el.fileQueue.replaceChildren();
+
   if (!selectedP2PFiles.length) {
-    el.selectedFiles.textContent = '可发送图片、视频、ZIP/RAR/7z、DMG、EXE、APK 等任意文件。';
-  } else {
-    const total = selectedP2PFiles.reduce((sum, file) => sum + file.size, 0);
-    el.selectedFiles.textContent = `已选择 ${selectedP2PFiles.length} 个文件，共 ${formatBytes(total)}：${selectedP2PFiles.map((f) => f.name).join('、')}`;
+    el.selectedFiles.textContent = '尚未选择文件。支持任意浏览器能够提供为 File 对象的文件类型。';
+    updateSendFileButton();
+    return;
   }
+
+  const total = selectedP2PFiles.reduce((sum, file) => sum + file.size, 0);
+  el.selectedFiles.textContent = `待发送 ${selectedP2PFiles.length} 个文件，共 ${formatBytes(total)}。先选择接收者，再点“发送文件”。`;
+
+  selectedP2PFiles.forEach((file, index) => {
+    const row = document.createElement('div');
+    row.className = 'file-queue-item';
+
+    const info = document.createElement('div');
+    info.className = 'file-queue-info';
+
+    const name = document.createElement('strong');
+    name.textContent = file.name || `未命名文件 ${index + 1}`;
+
+    const meta = document.createElement('span');
+    meta.textContent = `${formatBytes(file.size)} · ${file.type || '未知类型'}`;
+    info.append(name, meta);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'file-remove';
+    remove.textContent = '移除';
+    remove.addEventListener('click', () => removeQueuedFile(index));
+
+    row.append(info, remove);
+    el.fileQueue.appendChild(row);
+  });
+
   updateSendFileButton();
 }
 
@@ -852,7 +941,7 @@ async function checkAdminStatus({ quiet = false } = {}) {
     }
 
     setChatActive(false);
-    if (!quiet) showNotice('管理员仍未上线，继续保持零轮询状态');
+    if (!quiet) showNotice('管理员未上线，继续保持完全静默');
     return false;
   } catch (error) {
     setChatActive(false);
@@ -973,7 +1062,7 @@ el.adminLoginForm.addEventListener('submit', async (event) => {
   try {
     await loginAdmin(password);
     el.adminDialog.close();
-    showNotice('管理员登录成功', 'success');
+    showNotice('管理员已上线，聊天室开始工作', 'success');
   } catch (error) {
     showNotice(error.message, 'error');
   }
@@ -987,7 +1076,7 @@ el.logoutBtn.addEventListener('click', async () => {
   }
   sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
   setChatActive(false);
-  showNotice('管理员已下线，自动轮询已停止');
+  showNotice('聊天室已关闭：轮询、心跳、P2P 信令和本地定时器均已停止');
 });
 
 el.exportBtn.addEventListener('click', async () => {
@@ -1046,11 +1135,50 @@ el.clearBtn.addEventListener('click', async () => {
 });
 
 el.p2pFileInput.addEventListener('change', () => {
-  selectedP2PFiles = [...(el.p2pFileInput.files || [])];
-  renderSelectedFiles();
+  addFilesToQueue(el.p2pFileInput.files, '选择');
+  // 允许再次选择同名文件；文件对象已经保存在内存队列中。
+  el.p2pFileInput.value = '';
 });
 
+el.clearFilesBtn.addEventListener('click', clearQueuedFiles);
 el.peerSelect.addEventListener('change', updateSendFileButton);
+
+// 支持从 Finder / 资源管理器 / 截图工具等直接复制文件后粘贴。
+// 只要浏览器通过 clipboardData.files 暴露为 File，就不限制扩展名/MIME。
+document.addEventListener('paste', (event) => {
+  const files = event.clipboardData?.files;
+  if (!files?.length) return; // 普通文本粘贴完全不受影响。
+  event.preventDefault();
+  addFilesToQueue(files, '粘贴');
+  el.pasteZone.classList.add('flash');
+  setTimeout(() => el.pasteZone.classList.remove('flash'), 450);
+});
+
+for (const type of ['dragenter', 'dragover']) {
+  el.pasteZone.addEventListener(type, (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    el.pasteZone.classList.add('dragging');
+  });
+}
+for (const type of ['dragleave', 'drop']) {
+  el.pasteZone.addEventListener(type, (event) => {
+    event.preventDefault();
+    el.pasteZone.classList.remove('dragging');
+  });
+}
+el.pasteZone.addEventListener('drop', (event) => {
+  addFilesToQueue(event.dataTransfer?.files, '拖拽');
+});
+el.pasteZone.addEventListener('click', () => {
+  el.p2pFileInput.click();
+});
+el.pasteZone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    el.p2pFileInput.click();
+  }
+});
 
 el.sendFileBtn.addEventListener('click', async () => {
   if (!chatActive) {
@@ -1076,9 +1204,7 @@ el.sendFileBtn.addEventListener('click', async () => {
       }
     }
     showNotice(`P2P 文件发送完成`, 'success', 3500);
-    selectedP2PFiles = [];
-    el.p2pFileInput.value = '';
-    renderSelectedFiles();
+    clearQueuedFiles();
   } catch (error) {
     showNotice(`文件发送失败：${error.message}`, 'error', 5200);
   } finally {
@@ -1092,26 +1218,18 @@ async function pollLoop() {
   if (chatActive) schedulePoll();
 }
 
-function startLocalTimers() {
-  // 只负责本地过期清理，不产生任何 Vercel 请求。
-  setInterval(() => {
-    messages = pruneExpired(messages);
-    render();
-  }, 15_000);
-}
-
-async function init() {
+function init() {
+  // 刷新/重新打开页面必须显式重新上线，避免页面加载时恢复旧管理员会话并产生 API 请求。
+  sessionStorage.removeItem(ADMIN_PASSWORD_KEY);
   el.nickname.value = localStorage.getItem(NICKNAME_KEY) || '';
   loadCache();
   renderSelectedFiles();
   renderPeers([]);
   setChatActive(false);
   render({ stickToBottom: true });
-  startLocalTimers();
 
-  // 页面加载只做一次状态检查。若管理员离线，此后不会自动请求 Vercel。
-  await checkAdminStatus({ quiet: true });
-  el.input.focus();
+  // 关键：初始化阶段不 fetch、不轮询、不心跳、不注册 peer、也不启动本地 interval。
+  // 访客点“进入聊天室”或管理员提交密码后，才发生第一次 API 请求。
 }
 
 document.addEventListener('visibilitychange', () => {
