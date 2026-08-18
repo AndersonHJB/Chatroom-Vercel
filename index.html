@@ -44,6 +44,13 @@
   </section>
 
   <main class="app-layout">
+    <input type="radio" name="mobile-tab" id="tab-chat" class="mobile-tab-input" checked />
+    <input type="radio" name="mobile-tab" id="tab-file" class="mobile-tab-input" />
+    <nav class="mobile-tabs" aria-label="移动端导航">
+      <label class="mobile-tab mobile-tab--chat" for="tab-chat">聊天</label>
+      <label class="mobile-tab mobile-tab--file" for="tab-file">文件</label>
+    </nav>
+
     <aside class="app-sidebar" aria-label="P2P 文件传输">
       <div class="side-head">
         <div>
